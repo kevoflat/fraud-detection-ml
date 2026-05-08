@@ -186,9 +186,9 @@ The Streamlit dashboard has three tabs:
 
 ## Author
 
-**[Your Full Name]**
+**[KELVIN MWANGI]**
 B.CS Graduate · Data Scientist
-[LinkedIn](https://linkedin.com/in/yourprofile) · [GitHub](https://github.com/yourusername)
+[LinkedIn](https://linkedin.com/in/kelvin-wathoni) · [GitHub](https://github.com/kevoflat)
 
 ---
 
