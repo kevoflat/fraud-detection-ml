@@ -345,7 +345,7 @@ with tab3:
             shap_df = pd.DataFrame(explanation)
             # Color direction column
             st.dataframe(
-                shap_df.style.applymap(
+                shap_df.style.map(
                     lambda v: "color: #E24B4A" if "↑" in str(v) else "color: #639922",
                     subset=["Direction"]
                 ),
