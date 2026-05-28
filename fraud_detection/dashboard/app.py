@@ -1,4 +1,4 @@
-Ôªøimport streamlit as st
+import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
@@ -13,14 +13,14 @@ import sys
 
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-st.set_page_config(page_title="Fraud Detection | Kelvin Mwangi", page_icon="üö®", layout="wide")
+st.set_page_config(page_title="Fraud Detection | Kelvin Mwangi", page_icon="??", layout="wide")
 
 FEATURE_COLS = [f"V{i}" for i in range(1, 29)] + [
     "amount_scaled","amount_log","amount_zscore","high_amount_flag","hour_sin","hour_cos","off_hours"
 ]
-MODEL_PATH   = Path("models/xgb_fraud.pkl")
-SCALER_PATH  = Path("models/scaler.pkl")
-FEATURE_PATH = Path("data/features.parquet")
+MODEL_PATH   = Path(__file__).parent.parent / "models/xgb_fraud.pkl")
+SCALER_PATH  = Path(__file__).parent.parent / "models/scaler.pkl")
+FEATURE_PATH = Path(__file__).parent.parent / "data/features.parquet")
 DEMO_MODE    = not MODEL_PATH.exists()
 
 @st.cache_resource
@@ -104,17 +104,17 @@ with st.sidebar:
     st.markdown("## Controls")
     threshold = st.slider("Decision threshold", 0.1, 0.9, 0.5, 0.05)
     st.markdown("---")
-    st.success("Model loaded") if not DEMO_MODE else st.warning("Demo mode ‚Äî model not found")
+    st.success("Model loaded") if not DEMO_MODE else st.warning("Demo mode ó model not found")
     st.markdown("---")
-    st.markdown("**Stack:** XGBoost ¬∑ SMOTE ¬∑ SHAP ¬∑ Streamlit")
-    st.markdown("**Data:** 284,807 txns ¬∑ 492 fraud (0.17%)")
+    st.markdown("**Stack:** XGBoost ∑ SMOTE ∑ SHAP ∑ Streamlit")
+    st.markdown("**Data:** 284,807 txns ∑ 492 fraud (0.17%)")
     st.markdown("---")
-    st.markdown("[LinkedIn](https://www.linkedin.com/in/kelvin-wathoni) ¬∑ [GitHub](https://github.com/kevoflat)")
+    st.markdown("[LinkedIn](https://www.linkedin.com/in/kelvin-wathoni) ∑ [GitHub](https://github.com/kevoflat)")
 
-st.title("üö® Mobile Money Fraud Detection System")
-st.markdown("XGBoost + SMOTE + SHAP ¬∑ Real-time scoring ¬∑ Kelvin Mwangi")
+st.title("?? Mobile Money Fraud Detection System")
+st.markdown("XGBoost + SMOTE + SHAP ∑ Real-time scoring ∑ Kelvin Mwangi")
 if DEMO_MODE:
-    st.info("Demo mode ‚Äî synthetic data only. Add model artifacts to enable live scoring.")
+    st.info("Demo mode ó synthetic data only. Add model artifacts to enable live scoring.")
 st.markdown("---")
 
 total, fraud_n, hourly, amount_stats, amounts = load_summary_stats()
@@ -126,7 +126,7 @@ c4.metric("AUC-PR","0.8714")
 c5.metric("Precision","94.1%")
 st.markdown("---")
 
-tab1,tab2,tab3,tab4 = st.tabs(["üìä Overview","üîç SHAP","‚ö° Score Transaction","üìÅ Batch Upload"])
+tab1,tab2,tab3,tab4 = st.tabs(["?? Overview","?? SHAP","? Score Transaction","?? Batch Upload"])
 
 with tab1:
     c_a, c_b = st.columns(2)
@@ -150,30 +150,30 @@ with tab1:
 
     st.subheader("Evaluation plots")
     ec1,ec2 = st.columns(2)
-    if Path("models/plots/roc_pr.png").exists():
+    if Path(__file__).parent.parent / "models/plots/roc_pr.png").exists():
         ec1.image("models/plots/roc_pr.png", caption="ROC & PR curves", use_column_width=True)
-    if Path("models/plots/confusion_matrix.png").exists():
+    if Path(__file__).parent.parent / "models/plots/confusion_matrix.png").exists():
         ec2.image("models/plots/confusion_matrix.png", caption="Confusion matrix", use_column_width=True)
 
 with tab2:
     st.subheader("Global SHAP feature importance")
     s1,s2 = st.columns(2)
-    if Path("models/plots/shap_bar.png").exists():
+    if Path(__file__).parent.parent / "models/plots/shap_bar.png").exists():
         s1.image("models/plots/shap_bar.png", caption="Mean SHAP importance", use_column_width=True)
-    if Path("models/plots/shap_summary.png").exists():
+    if Path(__file__).parent.parent / "models/plots/shap_summary.png").exists():
         s2.image("models/plots/shap_summary.png", caption="SHAP beeswarm", use_column_width=True)
     st.markdown("---")
     st.dataframe(pd.DataFrame({
         "Feature":["V14","V17","V12","amount_zscore","off_hours","high_amount_flag","hour_sin/cos"],
         "Type":["PCA","PCA","PCA","Engineered","Engineered","Engineered","Engineered"],
         "Interpretation":[
-            "Strongest fraud signal ‚Äî high absolute V14 = anomalous card behaviour",
+            "Strongest fraud signal ó high absolute V14 = anomalous card behaviour",
             "Transaction velocity and recency pattern",
             "Merchant category signal",
-            "Amount unusualness vs population ‚Äî fraud clusters at extremes",
-            "1 if midnight to 6am ‚Äî elevated fraud window",
+            "Amount unusualness vs population ó fraud clusters at extremes",
+            "1 if midnight to 6am ó elevated fraud window",
             "1 if amount more than 3 std above mean",
-            "Cyclic hour encoding ‚Äî intra-day fraud timing",
+            "Cyclic hour encoding ó intra-day fraud timing",
         ]
     }), use_container_width=True, hide_index=True)
 
@@ -201,9 +201,9 @@ with tab3:
             with st.spinner("Scoring..."):
                 fraud_prob, is_fraud, explanation = score_transaction(txn, threshold)
             if is_fraud:
-                st.markdown(f'<div class="fraud-alert">FRAUD DETECTED ‚Äî probability: {fraud_prob:.4f}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="fraud-alert">FRAUD DETECTED ó probability: {fraud_prob:.4f}</div>', unsafe_allow_html=True)
             else:
-                st.markdown(f'<div class="legit-ok">LEGITIMATE ‚Äî probability: {fraud_prob:.4f}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="legit-ok">LEGITIMATE ó probability: {fraud_prob:.4f}</div>', unsafe_allow_html=True)
             fig_g = go.Figure(go.Indicator(
                 mode="gauge+number", value=fraud_prob*100,
                 title={"text":"Fraud probability (%)"},
