@@ -1,4 +1,13 @@
-﻿import streamlit as st
+"""
+dashboard/app.py
+Streamlit dashboard — real-time fraud monitoring + SHAP explainability.
+Productionized version: scaler loaded from artifact, demo mode for deployment.
+
+Run locally:  streamlit run dashboard/app.py
+Deploy:       streamlit.io → connect GitHub repo → done
+"""
+
+import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
@@ -12,50 +21,96 @@ from pathlib import Path
 import sys
 
 sys.path.append(str(Path(__file__).parent.parent / "src"))
-from predict import score, THRESHOLD
-from features import PCA_COLS
 
-st.set_page_config(page_title="Fraud Detection | Kelvin Mwangi", page_icon="🚨", layout="wide")
+# ── Config ────────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Fraud Detection | Kelvin Mwangi",
+    page_icon="🚨",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-FEATURE_COLS = PCA_COLS + ["amount_scaled","amount_log","amount_zscore","high_amount_flag","hour_sin","hour_cos","off_hours"]
-MODEL_PATH  = Path("models/xgb_fraud.pkl")
-SCALER_PATH = Path("models/scaler.pkl")
-SHAP_PATH   = Path("models/shap_values.pkl")
-FEATURE_PATH= Path("data/features.parquet")
+FEATURE_COLS = [f"V{i}" for i in range(1, 29)] + [
+    "amount_scaled", "amount_log", "amount_zscore",
+    "high_amount_flag", "hour_sin", "hour_cos", "off_hours"
+]
 
+MODEL_PATH   = Path("models/xgb_fraud.pkl")
+SCALER_PATH  = Path("models/scaler.pkl")
+SHAP_PATH    = Path("models/shap_values.pkl")
+FEATURE_PATH = Path("data/features.parquet")
+
+# ── Demo mode: synthetic data when artifacts not present ──────────────────────
+DEMO_MODE = not MODEL_PATH.exists()
+
+# ── Artifact loaders ──────────────────────────────────────────────────────────
 @st.cache_resource
 def load_pipeline():
     return joblib.load(MODEL_PATH)
 
 @st.cache_resource
 def load_scaler():
+    """Load saved RobustScaler — fit on training data, not on inference input."""
     return joblib.load(SCALER_PATH)
 
 @st.cache_data
-def load_summary_stats():
-    df = pd.read_parquet(FEATURE_PATH, columns=["Time","Amount","Class"])
-    total = len(df)
-    fraud_n = int(df["Class"].sum())
-    df["hour"] = (df["Time"] % 86400 / 3600).astype(int)
-    hourly = df.groupby("hour")["Class"].agg(["sum","count"])
-    hourly["fraud_rate"] = hourly["sum"] / hourly["count"] * 100
-    amount_stats = df.groupby("Class")["Amount"].describe().rename(index={0:"Legit",1:"Fraud"})
-    amounts = df.groupby("Class")["Amount"].apply(list).to_dict()
-    return total, fraud_n, hourly, amount_stats, amounts
+def load_shap_data():
+    data = joblib.load(SHAP_PATH)
+    return data["shap_values"], data["X_sample"]
 
-def preprocess_txn(txn, scaler):
+@st.cache_data
+def load_summary_stats():
+    """Load only aggregated stats — avoids loading 150MB parquet on every refresh."""
+    if FEATURE_PATH.exists():
+        df = pd.read_parquet(FEATURE_PATH, columns=["Time", "Amount", "Class"])
+        total = len(df)
+        fraud_n = int(df["Class"].sum())
+        # Hourly fraud rate
+        df["hour"] = (df["Time"] % 86400 / 3600).astype(int)
+        hourly = df.groupby("hour")["Class"].agg(["sum", "count"])
+        hourly["fraud_rate"] = hourly["sum"] / hourly["count"] * 100
+        # Amount stats by class
+        amount_stats = df.groupby("Class")["Amount"].describe().rename(index={0: "Legit", 1: "Fraud"})
+        amounts = df.groupby("Class")["Amount"].apply(list).to_dict()
+        return total, fraud_n, hourly, amount_stats, amounts
+    else:
+        # Demo synthetic data
+        np.random.seed(42)
+        total = 284807
+        fraud_n = 492
+        hours = np.arange(24)
+        fraud_rates = np.abs(np.sin(hours / 24 * np.pi * 2)) * 0.4 + 0.1
+        hourly = pd.DataFrame({"sum": fraud_rates * 100, "count": 10000, "fraud_rate": fraud_rates}, index=hours)
+        amount_stats = pd.DataFrame({"mean": [88.3, 122.2], "std": [250.1, 256.7], "max": [25691, 2125]},
+                                     index=["Legit", "Fraud"])
+        amounts = {0: list(np.abs(np.random.exponential(80, 500))),
+                   1: list(np.abs(np.random.exponential(100, 80)))}
+        return total, fraud_n, hourly, amount_stats, amounts
+
+
+# ── Preprocessing (inference) ─────────────────────────────────────────────────
+def preprocess_txn(txn: dict, scaler) -> pd.DataFrame:
+    """
+    Replicate features.py logic using saved scaler artifact.
+    Fixes the training/inference scaler mismatch bug.
+    """
     df = pd.DataFrame([txn])
+    # Time features
     df["hour"] = (df["Time"] % 86400) / 3600
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
     df["off_hours"] = ((df["hour"] >= 0) & (df["hour"] < 6)).astype(int)
+    # Amount features — use saved scaler (fit on training data)
     df["amount_scaled"] = scaler.transform(df[["Amount"]])
     df["amount_log"] = np.log1p(df["Amount"])
-    df["amount_zscore"] = (df["Amount"] - 88.35) / 250.12
+    # Training set stats (hardcoded from dataset)
+    TRAIN_AMT_MEAN, TRAIN_AMT_STD = 88.35, 250.12
+    df["amount_zscore"] = (df["Amount"] - TRAIN_AMT_MEAN) / TRAIN_AMT_STD
     df["high_amount_flag"] = (df["amount_zscore"] > 3).astype(int)
     return df[FEATURE_COLS]
 
-def score_transaction(txn, threshold):
+
+def score_transaction(txn: dict, threshold: float):
     pipeline = load_pipeline()
     scaler = load_scaler()
     X = preprocess_txn(txn, scaler)
@@ -68,24 +123,77 @@ def score_transaction(txn, threshold):
         {"Feature": FEATURE_COLS[i],
          "SHAP value": round(float(shap_vals[i]), 4),
          "Feature value": round(float(X.iloc[0, i]), 4),
-         "Direction": "Up Increases risk" if shap_vals[i] > 0 else "Down Reduces risk"}
+         "Direction": "↑ Increases risk" if shap_vals[i] > 0 else "↓ Reduces risk"}
         for i in top_idx
     ]
     return fraud_prob, fraud_prob >= threshold, explanation
 
-with st.sidebar:
-    st.markdown("## Settings")
-    threshold = st.slider("Decision threshold", 0.1, 0.9, 0.5, 0.05)
-    st.markdown("---")
-    st.markdown("**Stack:** XGBoost · SMOTE · SHAP · Streamlit")
-    st.markdown("**Dataset:** Kaggle Credit Card Fraud — 284,807 txns")
-    st.markdown("---")
-    st.markdown("**Kelvin Mwangi** — Data Scientist")
 
+def score_batch_upload(df_raw: pd.DataFrame, threshold: float):
+    pipeline = load_pipeline()
+    scaler = load_scaler()
+    results = []
+    for _, row in df_raw.iterrows():
+        txn = row.to_dict()
+        X = preprocess_txn(txn, scaler)
+        prob = float(pipeline.predict_proba(X)[0, 1])
+        results.append(prob)
+    df_raw = df_raw.copy()
+    df_raw["fraud_probability"] = results
+    df_raw["prediction"] = (df_raw["fraud_probability"] >= threshold).map({True: "🚨 FRAUD", False: "✅ LEGIT"})
+    df_raw["risk_tier"] = pd.cut(df_raw["fraud_probability"],
+                                  bins=[0, 0.3, 0.6, 1.0],
+                                  labels=["Low", "Medium", "High"])
+    return df_raw.sort_values("fraud_probability", ascending=False)
+
+
+# ── Custom CSS ────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .metric-card {
+        background: #f8f9fa; border-radius: 8px; padding: 16px;
+        border-left: 4px solid #185FA5;
+    }
+    .fraud-alert {
+        background: #FCEBEB; border-radius: 8px; padding: 16px;
+        border-left: 4px solid #E24B4A; color: #E24B4A; font-weight: bold;
+    }
+    .legit-ok {
+        background: #EAF3DE; border-radius: 8px; padding: 16px;
+        border-left: 4px solid #639922; color: #3a5a10; font-weight: bold;
+    }
+    [data-testid="stSidebar"] { background-color: #0f1117; color: white; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## ⚙️ Controls")
+    threshold = st.slider("Decision threshold", 0.1, 0.9, 0.5, 0.05,
+                          help="Lower = catch more fraud (more false positives)")
+    st.markdown("---")
+    if DEMO_MODE:
+        st.warning("⚠️ **Demo mode** — model artifacts not found.\nScore tab disabled.")
+    else:
+        st.success("✅ Model loaded")
+    st.markdown("---")
+    st.markdown("**Stack**")
+    st.markdown("XGBoost · SMOTE · SHAP  \nStreamlit · Plotly · scikit-learn")
+    st.markdown("**Dataset**")
+    st.markdown("Kaggle Credit Card Fraud  \n284,807 txns · 492 fraud (0.17%)")
+    st.markdown("---")
+    st.markdown("**Kelvin Mwangi**  \n[LinkedIn](https://www.linkedin.com/in/kelvin-wathoni) · [GitHub](https://github.com/kevoflat)")
+
+# ── Header ─────────────────────────────────────────────────────────────────────
 st.title("🚨 Mobile Money Fraud Detection System")
-st.markdown("End-to-end ML pipeline · XGBoost + SMOTE + SHAP · Real-time scoring")
+st.markdown("End-to-end ML pipeline · XGBoost + SMOTE + SHAP explainability · Real-time scoring")
+
+if DEMO_MODE:
+    st.info("📊 Running in **demo mode** with synthetic data. Deploy with model artifacts to enable live scoring.")
+
 st.markdown("---")
 
+# ── KPI Row ───────────────────────────────────────────────────────────────────
 total, fraud_n, hourly, amount_stats, amounts = load_summary_stats()
 fraud_rate = fraud_n / total * 100
 
@@ -95,105 +203,185 @@ c2.metric("Fraud Cases", f"{fraud_n:,}", delta=f"{fraud_rate:.3f}%", delta_color
 c3.metric("ROC-AUC", "0.9792")
 c4.metric("AUC-PR", "0.8714")
 c5.metric("Precision (Fraud)", "94.1%")
+
 st.markdown("---")
 
-tab1, tab2, tab3 = st.tabs(["📊 Overview", "🔍 SHAP Explainability", "⚡ Score Transaction"])
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview", "🔍 SHAP Explainability", "⚡ Score Transaction", "📁 Batch Upload"])
 
+# ── Tab 1: Overview ────────────────────────────────────────────────────────────
 with tab1:
     col_a, col_b = st.columns(2)
+
     with col_a:
-        st.subheader("Amount distribution: Fraud vs Legit")
+        st.subheader("Transaction amount: Fraud vs Legit")
         fig = go.Figure()
-        fig.add_trace(go.Histogram(x=amounts[0][:2000], name="Legit", marker_color="#185FA5", opacity=0.65, nbinsx=60))
-        fig.add_trace(go.Histogram(x=amounts[1], name="Fraud", marker_color="#E24B4A", opacity=0.75, nbinsx=60))
-        fig.update_layout(barmode="overlay", height=320, margin=dict(t=10,b=10))
+        fig.add_trace(go.Histogram(x=amounts[0][:2000], name="Legit",
+                                    marker_color="#185FA5", opacity=0.65, nbinsx=60))
+        fig.add_trace(go.Histogram(x=amounts[1], name="Fraud",
+                                    marker_color="#E24B4A", opacity=0.75, nbinsx=60))
+        fig.update_layout(barmode="overlay", height=320, margin=dict(t=10, b=10),
+                          legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig, use_container_width=True)
+
     with col_b:
         st.subheader("Amount statistics by class")
         st.dataframe(amount_stats.style.format("{:.2f}"), use_container_width=True)
+        st.markdown("**Key insight:** Fraud transactions cluster at lower amounts — fraud actors avoid large round numbers that trigger rule-based alerts.")
 
-    st.subheader("Hourly fraud rate")
-    fig2 = px.bar(hourly.reset_index(), x="hour", y="fraud_rate",
-                  color="fraud_rate", color_continuous_scale=["#EAF3DE","#EF9F27","#E24B4A"],
-                  labels={"hour":"Hour of day","fraud_rate":"Fraud rate (%)"})
-    fig2.update_layout(height=280, margin=dict(t=10,b=10))
+    st.subheader("Hourly fraud rate — when does fraud peak?")
+    fig2 = px.bar(
+        hourly.reset_index(), x="hour", y="fraud_rate",
+        color="fraud_rate",
+        color_continuous_scale=["#EAF3DE", "#EF9F27", "#E24B4A"],
+        labels={"hour": "Hour of day (0–23)", "fraud_rate": "Fraud rate (%)"},
+    )
+    fig2.update_layout(height=280, margin=dict(t=10, b=10))
     st.plotly_chart(fig2, use_container_width=True)
+    st.caption("Off-hours (00:00–06:00) show elevated fraud rates — a key engineered feature (`off_hours`).")
 
-    st.subheader("Model evaluation plots")
-    ec1, ec2 = st.columns(2)
+    # Evaluation plots
+    st.subheader("Model evaluation")
     roc_pr = Path("models/plots/roc_pr.png")
     conf   = Path("models/plots/confusion_matrix.png")
+    ec1, ec2 = st.columns(2)
     if roc_pr.exists():
-        ec1.image(str(roc_pr), caption="ROC & PR curves", use_column_width=True)
+        ec1.image(str(roc_pr), caption="ROC & Precision-Recall curves", use_column_width=True)
     if conf.exists():
-        ec2.image(str(conf), caption="Confusion matrix", use_column_width=True)
+        ec2.image(str(conf), caption="Confusion matrix (test set)", use_column_width=True)
+    if not roc_pr.exists():
+        st.info("Run `python main.py --step evaluate` to generate evaluation plots.")
 
+# ── Tab 2: SHAP ────────────────────────────────────────────────────────────────
 with tab2:
-    st.subheader("Global SHAP — feature importance")
+    st.subheader("Global SHAP — what drives fraud predictions?")
+    st.markdown("TreeExplainer computes exact Shapley values — each feature's average marginal contribution to the model output.")
+
     col_s1, col_s2 = st.columns(2)
     shap_bar = Path("models/plots/shap_bar.png")
     shap_sum = Path("models/plots/shap_summary.png")
+
     if shap_bar.exists():
-        col_s1.image(str(shap_bar), caption="Mean SHAP — importance ranking", use_column_width=True)
+        col_s1.image(str(shap_bar), caption="Mean |SHAP| — overall importance ranking", use_column_width=True)
     if shap_sum.exists():
-        col_s2.image(str(shap_sum), caption="SHAP beeswarm — direction of impact", use_column_width=True)
+        col_s2.image(str(shap_sum), caption="SHAP beeswarm — direction + magnitude of impact", use_column_width=True)
+    if not shap_bar.exists():
+        st.info("SHAP plots not found. Run `python main.py --step evaluate` to generate.")
+
     st.markdown("---")
-    st.subheader("Feature interpretation")
+    st.subheader("Feature interpretation guide")
     st.dataframe(pd.DataFrame({
-        "Feature": ["V14","V17","V12","amount_zscore","off_hours","high_amount_flag","hour_sin/cos"],
-        "Type": ["PCA","PCA","PCA","Engineered","Engineered","Engineered","Engineered"],
+        "Feature": ["V14", "V17", "V12", "amount_zscore", "off_hours", "high_amount_flag", "hour_sin/cos"],
+        "Type": ["PCA", "PCA", "PCA", "Engineered", "Engineered", "Engineered", "Engineered"],
         "Interpretation": [
-            "Strongest fraud signal — high absolute value = anomalous card behaviour",
-            "Transaction velocity / recency pattern",
-            "Merchant category signal",
-            "How unusual the amount is vs population — fraud clusters at extremes",
-            "1 if transaction between midnight-6am — elevated fraud window",
-            "1 if amount > 3 standard deviations above mean",
-            "Cyclic hour encoding — captures intra-day fraud timing",
+            "PCA-transformed card behaviour — high |V14| is strongest fraud signal",
+            "Captures transaction velocity / recency patterns",
+            "Merchant category / location-based signal",
+            "How unusual the amount is vs population mean — fraud clusters at z-score extremes",
+            "1 if transaction between midnight–6am — elevated fraud risk window",
+            "1 if amount > 3σ above mean — unusually large transactions",
+            "Cyclic hour encoding — captures intra-day fraud timing patterns",
         ]
     }), use_container_width=True, hide_index=True)
 
+# ── Tab 3: Score a transaction ─────────────────────────────────────────────────
 with tab3:
-    st.subheader("Score a single transaction in real time")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        amount   = st.number_input("Amount (KES)", min_value=0.0, value=250.0, step=10.0)
-        time_sec = st.number_input("Time (seconds since day start)", 0, 86400, 14400)
-    with col2:
-        v1  = st.number_input("V1",  value=-1.36)
-        v2  = st.number_input("V2",  value=-0.07)
-        v3  = st.number_input("V3",  value=2.54)
-    with col3:
-        v14 = st.number_input("V14 (top feature)", value=-2.10)
-        v17 = st.number_input("V17", value=-0.56)
-        v12 = st.number_input("V12", value=-2.96)
+    st.subheader("⚡ Real-time transaction scorer")
+    if DEMO_MODE:
+        st.warning("Model artifacts required. Add `models/xgb_fraud.pkl` and `models/scaler.pkl` to enable.")
+    else:
+        st.markdown("Enter transaction values → get fraud probability + SHAP explanation of that specific decision.")
 
-    if st.button("Score transaction", type="primary"):
-        txn = {f"V{i}": 0.0 for i in range(1, 29)}
-        txn.update({"V1":v1,"V2":v2,"V3":v3,"V14":v14,"V17":v17,"V12":v12,"Amount":amount,"Time":time_sec})
-        with st.spinner("Scoring..."):
-            fraud_prob, is_fraud, explanation = score_transaction(txn, threshold)
-        if is_fraud:
-            st.error(f"FRAUD DETECTED — probability: {fraud_prob:.4f}")
-        else:
-            st.success(f"LEGITIMATE — probability: {fraud_prob:.4f}")
-        fig_g = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=fraud_prob * 100,
-            title={"text": "Fraud probability (%)"},
-            number={"suffix": "%", "valueformat": ".1f"},
-            gauge={
-                "axis": {"range": [0, 100]},
-                "bar": {"color": "#E24B4A" if is_fraud else "#639922"},
-                "steps": [
-                    {"range": [0, 30], "color": "#EAF3DE"},
-                    {"range": [30, 60], "color": "#FAEEDA"},
-                    {"range": [60, 100], "color": "#FCEBEB"},
-                ],
-                "threshold": {"line": {"color": "#1a1a18", "width": 2}, "value": threshold * 100}
-            }
-        ))
-        fig_g.update_layout(height=260, margin=dict(t=30,b=10))
-        st.plotly_chart(fig_g, use_container_width=True)
-        st.markdown("#### Top 5 SHAP drivers for this transaction")
-        st.dataframe(pd.DataFrame(explanation), use_container_width=True, hide_index=True)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            amount = st.number_input("Amount (KES)", min_value=0.0, value=250.0, step=10.0)
+            time_sec = st.number_input("Time (seconds since day start)", 0, 86400, 14400)
+        with col2:
+            v1  = st.number_input("V1",  value=-1.36)
+            v2  = st.number_input("V2",  value=-0.07)
+            v3  = st.number_input("V3",  value=2.54)
+        with col3:
+            v14 = st.number_input("V14 (top feature)", value=-2.10)
+            v17 = st.number_input("V17", value=-0.56)
+            v12 = st.number_input("V12", value=-2.96)
+
+        if st.button("🔍 Score transaction", type="primary"):
+            txn = {f"V{i}": 0.0 for i in range(1, 29)}
+            txn.update({"V1": v1, "V2": v2, "V3": v3, "V14": v14, "V17": v17, "V12": v12,
+                         "Amount": amount, "Time": time_sec})
+
+            with st.spinner("Scoring..."):
+                fraud_prob, is_fraud, explanation = score_transaction(txn, threshold)
+
+            if is_fraud:
+                st.markdown(f'<div class="fraud-alert">🚨 FRAUD DETECTED — probability: {fraud_prob:.4f}</div>',
+                            unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="legit-ok">✅ LEGITIMATE — probability: {fraud_prob:.4f}</div>',
+                            unsafe_allow_html=True)
+
+            # Gauge
+            fig_g = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=fraud_prob * 100,
+                title={"text": "Fraud probability (%)"},
+                number={"suffix": "%", "valueformat": ".1f"},
+                gauge={
+                    "axis": {"range": [0, 100]},
+                    "bar": {"color": "#E24B4A" if is_fraud else "#639922"},
+                    "steps": [
+                        {"range": [0, 30], "color": "#EAF3DE"},
+                        {"range": [30, 60], "color": "#FAEEDA"},
+                        {"range": [60, 100], "color": "#FCEBEB"},
+                    ],
+                    "threshold": {"line": {"color": "#1a1a18", "width": 2},
+                                  "value": threshold * 100}
+                }
+            ))
+            fig_g.update_layout(height=260, margin=dict(t=30, b=10))
+            st.plotly_chart(fig_g, use_container_width=True)
+
+            st.markdown("#### SHAP explanation — top 5 drivers for this transaction")
+            shap_df = pd.DataFrame(explanation)
+            # Color direction column
+            st.dataframe(
+                shap_df.style.applymap(
+                    lambda v: "color: #E24B4A" if "↑" in str(v) else "color: #639922",
+                    subset=["Direction"]
+                ),
+                use_container_width=True, hide_index=True
+            )
+
+# ── Tab 4: Batch Upload ────────────────────────────────────────────────────────
+with tab4:
+    st.subheader("📁 Batch transaction scoring")
+    if DEMO_MODE:
+        st.warning("Model artifacts required to enable batch scoring.")
+    else:
+        st.markdown("Upload a CSV of transactions → download scored results with fraud probabilities.")
+        st.markdown("**Required columns:** `Time`, `V1`–`V28`, `Amount`")
+
+        uploaded = st.file_uploader("Upload transactions CSV", type=["csv"])
+        if uploaded:
+            df_upload = pd.read_csv(uploaded)
+            st.write(f"Loaded {len(df_upload):,} transactions")
+            st.dataframe(df_upload.head(3), use_container_width=True)
+
+            if st.button("🚀 Score all transactions", type="primary"):
+                with st.spinner(f"Scoring {len(df_upload):,} transactions..."):
+                    df_scored = score_batch_upload(df_upload, threshold)
+
+                fraud_found = (df_scored["prediction"] == "🚨 FRAUD").sum()
+                st.metric("Fraud detected", f"{fraud_found:,}",
+                          delta=f"{fraud_found/len(df_scored)*100:.2f}% of batch",
+                          delta_color="inverse")
+
+                st.dataframe(
+                    df_scored[["Amount", "fraud_probability", "prediction", "risk_tier"]].head(50)
+                    .style.background_gradient(subset=["fraud_probability"], cmap="RdYlGn_r"),
+                    use_container_width=True
+                )
+
+                csv = df_scored.to_csv(index=False).encode()
+                st.download_button("⬇️ Download scored CSV", csv,
+                                   "fraud_scored.csv", "text/csv")
